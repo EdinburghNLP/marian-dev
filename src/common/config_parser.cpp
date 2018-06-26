@@ -328,6 +328,25 @@ void ConfigParser::addOptionsModel(po::options_description& desc) {
      "Number of decoder layers (s2s)")
     //("dec-high-context", po::value<std::string>()->default_value("none"),
     // "Repeat attended context: none, repeat, conditional, conditional-repeat (s2s)")
+
+    // Multi-head attention
+    ("dec-attention-heads", po::value<int>()->default_value(1),
+     "Number of parallel attention heads in s2s decoder")
+    ("dec-attention-hops", po::value<int>()->default_value(1),
+     "Number of sequential attention hops in s2s decoder")
+    ("dec-attention-lookup-dim", po::value<int>()->default_value(-1),
+     "Vector size of the attention lookup mechanism, per head per hop (-1 same the encoder state dimension)")
+    ("dec-attention-projection-dim", po::value<int>()->default_value(-1),
+     "Project the context state to this size, per hop (-1 disables projection)")
+    ("dec-attention-independent-heads", po::value<bool>()->zero_tokens()->default_value(false),
+     "Use completely independent heads in multi-head attention (automatically enabled by --dec-attention-bilinear-lookup)")
+    ("dec-attention-bilinear-lookup", po::value<bool>()->zero_tokens()->default_value(false),
+     "Use log-bilinear softmax attention")
+    ("dec-attention-projection-layernorm", po::value<bool>()->zero_tokens()->default_value(false),
+     "Apply layer normalization after the context projection in the attention mechanism")
+    ("dec-attention-projection-tanh", po::value<bool>()->zero_tokens()->default_value(false),
+     "Apply a bias and tanh non-linearity after the context projection in the attention mechanism")
+
     ("skip", po::value<bool>()->zero_tokens()->default_value(false),
      "Use skip connections (s2s)")
     ("layer-normalization", po::value<bool>()->zero_tokens()->default_value(false),
@@ -860,6 +879,16 @@ void ConfigParser::parseOptions(int argc, char** argv, bool doValidate) {
   SET_OPTION("dec-cell-high-depth", int);
   SET_OPTION("dec-depth", int);
 
+  // Multi-head attention
+  SET_OPTION("dec-attention-heads", int);
+  SET_OPTION("dec-attention-hops", int);
+  SET_OPTION("dec-attention-lookup-dim", int);
+  SET_OPTION("dec-attention-projection-dim", int);
+  SET_OPTION("dec-attention-independent-heads", bool);
+  SET_OPTION("dec-attention-bilinear-lookup", bool);
+  SET_OPTION("dec-attention-projection-layernorm", bool);
+  SET_OPTION("dec-attention-projection-tanh", bool);
+
   SET_OPTION("skip", bool);
   SET_OPTION("tied-embeddings", bool);
   SET_OPTION("tied-embeddings-src", bool);
@@ -1123,6 +1152,7 @@ void ConfigParser::parseOptions(int argc, char** argv, bool doValidate) {
   //  mkl_set_num_threads(vm_["omp-threads"].as<size_t>());
   //#endif
   //#endif
+
 }
 
 std::vector<DeviceId> ConfigParser::getDevices() {
