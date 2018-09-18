@@ -150,7 +150,7 @@ public:
   EncoderS2S(Ptr<Options> options) : EncoderBase(options) {}
 
   virtual Ptr<EncoderState> build(Ptr<ExpressionGraph> graph,
-                                  Ptr<data::CorpusBatch> batch) {
+                                  Ptr<data::CorpusBatch> batch) override {
     auto embeddings = buildSourceEmbeddings(graph);
 
     using namespace keywords;
@@ -172,7 +172,7 @@ public:
     return New<EncoderState>(context, batchMask, batch);
   }
 
-  void clear() {}
+  void clear() override {}
 };
 
 class DecoderS2S : public DecoderBase {
@@ -197,7 +197,7 @@ private:
         ("skip", opt<bool>("skip"));
 
     ABORT_IF(opt<bool>("dec-attention-bilinear-lookup"),
-             "--dec-attention-bilinear-lookup is disabled due to a bug");
+             "--dec-attention-bilinear-lookup is disabled due to a bug");  	// See: https://github.com/marian-nmt/marian-dev/issues/250
 
     size_t decoderLayers = opt<size_t>("dec-depth");
     size_t decoderBaseDepth = opt<size_t>("dec-cell-base-depth");
@@ -208,8 +208,13 @@ private:
 
     // setting up conditional (transitional) cell
     auto baseCell = rnn::stacked_cell(graph);
+
+    // For each encoder state, store the id of the last RNN cell that computes an attended context. This is the final attended context used in the output layer.
     lastAttentionCellIds_ = std::vector<size_t>(state->getEncoderStates().size(), -1);
+    
+    // Counts the number of cells in the base layer of the decoder stack
     numBaseCells_ = 0;
+
     for(int i = 1; i <= decoderBaseDepth; ++i) {
       bool transition = (i > 1+decoderAttentionHops);
       auto paramPrefix = prefix_ + "_cell" + std::to_string(i);
@@ -217,8 +222,8 @@ private:
                          ("prefix", paramPrefix)  //
                          ("final", i > 1)         //
                          ("transition", transition));
+
       ++numBaseCells_;
-      //LOG(info, "Decoder, create cell: i:{} paramPrefix:{} transition:{} final:{}", i, paramPrefix, transition, i > 1);
       if(i <= decoderAttentionHops) {
         for(int k = 0; k < state->getEncoderStates().size(); ++k) {
           auto attPrefix = prefix_;
@@ -227,10 +232,8 @@ private:
           if (i > 1) {
             attPrefix += "_hop" + std::to_string(i);
           }
-          //LOG(info, "Decoder, create attention: {}", attPrefix);
 
           auto encState = state->getEncoderStates()[k];
-
          
           baseCell.push_back(rnn::attention(graph)("prefix", attPrefix)
                                    ("attentionHeads", opt<int>("dec-attention-heads"))
@@ -239,10 +242,9 @@ private:
                                    ("attentionIndependentHeads", opt<bool>("dec-attention-independent-heads"))
                                    ("attentionBilinearLookup", opt<bool>("dec-attention-bilinear-lookup"))
                                    ("attentionProjectionLayerNorm", opt<bool>("dec-attention-projection-layernorm"))
-                                   ("attentionProjectionTanH", opt<bool>("dec-attention-projection-tanh"))
+                                   ("attentionProjectionActivation", opt<std::string>("dec-attention-projection-activation"))
                                    .set_state(encState));
           lastAttentionCellIds_[k] = numBaseCells_;
-          //LOG(info, "attention head for encoder state {} created at numBaseCells_: {}", k, numBaseCells_);
           ++numBaseCells_;
         }
       }
@@ -251,11 +253,11 @@ private:
     rnn.push_back(baseCell);
 
     // Add more cells to RNN (stacked RNN)
-    for(int i = 2; i <= decoderLayers; ++i) {
+    for(size_t i = 2; i <= decoderLayers; ++i) {
       // deep transition
       auto highCell = rnn::stacked_cell(graph);
 
-      for(int j = 1; j <= decoderHighDepth; j++) {
+      for(size_t j = 1; j <= decoderHighDepth; j++) {
         auto paramPrefix
             = prefix_ + "_l" + std::to_string(i) + "_cell" + std::to_string(j);
         highCell.push_back(rnn::cell(graph)("prefix", paramPrefix));
@@ -274,7 +276,7 @@ public:
   virtual Ptr<DecoderState> startState(
       Ptr<ExpressionGraph> graph,
       Ptr<data::CorpusBatch> batch,
-      std::vector<Ptr<EncoderState>>& encStates) {
+      std::vector<Ptr<EncoderState>>& encStates) override {
     using namespace keywords;
 
     std::vector<Expr> meanContexts;
@@ -297,7 +299,7 @@ public:
           ("nematus-normalization",
            options_->has("original-type")
                && opt<std::string>("original-type") == "nematus")  //
-          );
+      );
 
       start = mlp->apply(meanContexts);
     } else {
@@ -312,7 +314,7 @@ public:
   }
 
   virtual Ptr<DecoderState> step(Ptr<ExpressionGraph> graph,
-                                 Ptr<DecoderState> state) {
+                                 Ptr<DecoderState> state) override {
     using namespace keywords;
 
     auto embeddings = state->getTargetEmbeddings();
@@ -336,10 +338,9 @@ public:
     rnn::States decoderStates = rnn_->lastCellStates();
 
     std::vector<Expr> alignedContexts;
-    for(int k = 0; k < state->getEncoderStates().size(); ++k) {
+    for(size_t k = 0; k < state->getEncoderStates().size(); ++k) {
       // retrieve all the aligned contexts computed by the attention mechanism
-      size_t headId = lastAttentionCellIds_[k];
-      //LOG(info, "attention for encoder state {} headId: {}", k, headId);
+      size_t headId = lastAttentionCellIds_[k];  // index of the last attention head for the k-th encoder state
       auto att = rnn_->at(0)
                      ->as<rnn::StackedCell>()
                      ->at(headId)
@@ -366,7 +367,7 @@ public:
 
       int dimTrgVoc = opt<std::vector<int>>("dim-vocabs")[batchIndex_];
 
-      auto final = mlp::output(graph)          //
+      auto final = mlp::output(graph)           //
           ("prefix", prefix_ + "_ff_logit_l2")  //
           ("dim", dimTrgVoc);
 
@@ -383,9 +384,9 @@ public:
       // assemble layers into MLP and apply to embeddings, decoder context and
       // aligned source context
       output_ = mlp::mlp(graph)         //
-                     .push_back(hidden)  //
-                     .push_back(final)
-                     .construct();
+                    .push_back(hidden)  //
+                    .push_back(final)
+                    .construct();
     }
 
     Expr logits;
@@ -394,23 +395,25 @@ public:
     else
       logits = output_->apply(embeddings, decoderContext);
 
-
     // return unormalized(!) probabilities
-    auto nextState = New<DecoderState>(decoderStates, logits, state->getEncoderStates(), state->getBatch());
+    auto nextState = New<DecoderState>(
+        decoderStates, logits, state->getEncoderStates(), state->getBatch());
+
+    // Advance current target token position by one
     nextState->setPosition(state->getPosition() + 1);
     return nextState;
   }
 
   // helper function for guided alignment
-  virtual const std::vector<Expr> getAlignments(int i = 0) {
+  virtual const std::vector<Expr> getAlignments(int i = 0) override {
     auto att
         = rnn_->at(0)->as<rnn::StackedCell>()->at(i + 1)->as<rnn::Attention>();
     return att->getAlignments();
   }
 
-  void clear() {
+  void clear() override {
     rnn_ = nullptr;
     output_ = nullptr;
   }
 };
-}
+}  // namespace marian
