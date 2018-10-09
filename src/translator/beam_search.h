@@ -38,7 +38,9 @@ public:
                std::vector<Ptr<ScorerState>>& states,
                size_t beamSize,
                bool first,
-               Ptr<data::CorpusBatch> batch) {
+               Ptr<data::CorpusBatch> batch,
+               const std::vector<unsigned int> topWordScoresKeys,
+               const std::vector<float> topWordScoresVals) {
     Beams newBeams(beams.size());
 
     std::vector<float> align;
@@ -46,6 +48,7 @@ public:
       // Use alignments from the first scorer, even if ensemble
       align = scorers_[0]->getAlignment();
 
+    size_t wordIOffset = 0;
     for(size_t i = 0; i < keys.size(); ++i) {
       // Keys contains indices to vocab items in the entire beam.
       // Values can be between 0 and beamSize * vocabSize.
@@ -58,6 +61,23 @@ public:
       auto shortlist = scorers_[0]->getShortlist();
       if(shortlist)
         embIdx = shortlist->reverseMap(embIdx);
+
+      // Process top word keys if present
+/*      int dimBatch = (int)batch->size();
+      std::vector<unsigned int> topWordScoresKeysProcessed(topWordScoresKeys.size() / dimBatch);
+      std::vector<float> topWordScoresValsProcessed(topWordScoresVals.size() / dimBatch);
+      size_t offset = beamIdx * topWordScoresKeysProcessed.size();
+      LOG(info, "\ntopWordScoresKeys.size(): {}", topWordScoresKeys.size());
+      for (size_t wordI = 0; wordI < topWordScoresKeysProcessed.size(); ++wordI, ++wordIOffset) {
+        unsigned int currKey = topWordScoresKeys[wordIOffset] % vocabSize;
+        if (shortlist)
+          currKey = shortlist->reverseMap(currKey);
+        topWordScoresKeysProcessed[wordI] = currKey;
+        topWordScoresValsProcessed[wordI] = topWordScoresVals[wordIOffset];
+        LOG(info, "i: {}, embIdx: {}, beamIdx: {}, wordI: {}, wordIOffset: {}, currKey: {}, score: {}", i, embIdx, beamIdx, wordI, wordIOffset, currKey, topWordScoresValsProcessed[wordIOffset]);
+      }
+      LOG(info, "topWordScoresKeysProcessed.size(): {}", topWordScoresKeysProcessed.size());
+      LOG(info, "topWordScoresValsProcessed.size(): {}", topWordScoresValsProcessed.size());*/
 
       if(newBeams[beamIdx].size() < beams[beamIdx].size()) {
         auto& beam = beams[beamIdx];
@@ -78,7 +98,22 @@ public:
         if(first)
           beamHypIdx = 0;
 
-        auto hyp = New<Hypothesis>(beam[beamHypIdx], embIdx, hypIdxTrans, pathScore);
+        // Process top word keys if present
+        int dimBatch = (int)batch->size();
+        std::vector<unsigned int> topWordScoresKeysProcessed(topWordScoresKeys.size() / dimBatch);
+        std::vector<float> topWordScoresValsProcessed(topWordScoresVals.size() / dimBatch);
+        //LOG(info, "\ntopWordScoresKeys.size(): {}", topWordScoresKeys.size());
+        for (size_t wordI = 0; wordI < topWordScoresKeysProcessed.size(); ++wordI) {
+          size_t rawI = wordI + beamIdx * topWordScoresKeysProcessed.size();
+          unsigned int currKey = topWordScoresKeys[rawI] % vocabSize;
+          if (shortlist)
+            currKey = shortlist->reverseMap(currKey);
+          topWordScoresKeysProcessed[wordI] = currKey;
+          topWordScoresValsProcessed[wordI] = topWordScoresVals[rawI];
+          //LOG(info, "i: {}, embIdx: {}, beamIdx: {}, beamHypIdx {}, hypIdxTrans {}, wordI: {}, rawI {}, currKey: {}, score: {}", i, embIdx, beamIdx, beamHypIdx, hypIdxTrans, wordI, rawI, currKey, topWordScoresValsProcessed[rawI]);
+        }
+
+        auto hyp = New<Hypothesis>(beam[beamHypIdx], embIdx, hypIdxTrans, pathScore, topWordScoresKeysProcessed, topWordScoresValsProcessed);
 
         // Set score breakdown for n-best lists
         if(options_->get<bool>("n-best")) {
@@ -206,9 +241,11 @@ public:
       std::vector<size_t> hypIndices; // [beamIndex * activeBatchSize + batchIndex] backpointers, concatenated over beam positions. Used for reordering hypotheses
       std::vector<size_t> embIndices;
       Expr prevPathScores; // [beam, 1, 1, 1]
+      Expr prevWordScores; // [beam, 1, 1, 1]
       if(first) {
         // no scores yet
         prevPathScores = graph->constant({1, 1, 1, 1}, inits::from_value(0));
+        //prevWordScores = graph->constant({1, 1, 1, 1}, inits::from_value(0));
       } else {
         std::vector<float> beamScores;
 
@@ -232,25 +269,38 @@ public:
 
         prevPathScores = graph->constant({(int)localBeamSize, 1, dimBatch, 1},
                                     inits::from_vector(beamScores));
+        //prevWordScores = graph->constant({(int)localBeamSize, 1, dimBatch, 1}, inits::from_value(0));
       }
 
       //**********************************************************************
       // prepare scores for beam search
       auto pathScores = prevPathScores;
+      auto wordScores = prevWordScores;
 
       for(size_t i = 0; i < scorers_.size(); ++i) {
         states[i] = scorers_[i]->step(
             graph, states[i], hypIndices, embIndices, dimBatch, (int)localBeamSize);
 
+        Expr currWordScores;
         if(scorers_[i]->getWeight() != 1.f)
-          pathScores = pathScores + scorers_[i]->getWeight() * states[i]->getLogProbs();
+          currWordScores = scorers_[i]->getWeight() * states[i]->getLogProbs();
         else
-          pathScores = pathScores + states[i]->getLogProbs();
+          currWordScores = states[i]->getLogProbs();
+        wordScores = (i == 0)? currWordScores: (wordScores + currWordScores);
       }
+      pathScores = pathScores + wordScores;
 
       // make beams continuous
-      if(dimBatch > 1 && localBeamSize > 1)
+      if(dimBatch > 1 && localBeamSize > 1) {
         pathScores = transpose(pathScores, {2, 1, 0, 3});
+        if (options_->get<size_t>("output-word-scores") > 0) {
+          wordScores = transpose(wordScores, {2, 1, 0, 3});
+        }
+      }
+
+      /*if (options_->get<size_t>("output-word-scores") > 0) {
+        wordScores = reshape(wordScores, {1, 1, wordScores->shape()[0] * wordScores->shape()[2], wordScores->shape()[3]});
+      }*/
 
       if(first)
         graph->forward();
@@ -264,6 +314,40 @@ public:
         suppressWord(pathScores, trgUnkId_);
       for(auto state : states)
         state->blacklist(pathScores, batch);
+
+      //**********************************************************************
+      // record word scores in order to output them
+      std::vector<unsigned int> topWordScoresKeys;
+      std::vector<float> topWordScoresVals;
+      if (options_->get<size_t>("output-word-scores") > 0) {
+        // Inefficient since it essentially repeats computation, but subtraction of prevPathScores from pathScores doesn't work
+        //LOG(info, "a wordScores->shape: {}", wordScores->shape());
+        //LOG(info, "a wordScores->val(): {}", wordScores->val());
+        //debug(wordScores, "a wordScores");
+        if(trgUnkId_ != -1 && options_->has("allow-unk") && !options_->get<bool>("allow-unk"))
+          suppressWord(wordScores, trgUnkId_);
+        //LOG(info, "b wordScoresTransposed->shape: {}", wordScores->shape());
+        for(auto state : states)
+          state->blacklist(wordScores, batch);
+
+        // If wordScores is computed with the following commented out lines, it causes a crash in nth->getNBestList (EDIT: maybe not?)
+        //Expr transposedPrevPathScores = reshape(transpose(prevPathScores, {2, 1, 0, 3}), pathScores->shape());
+        //Expr wordScores = pathScores - transposedPrevPathScores;
+
+        //LOG(info, "wordScores->shape: {}", wordScores->shape());
+
+        //size_t k = options_->get<size_t>("output-word-scores");
+        //size_t k = std::min(options_->get<size_t>("output-word-scores"), localBeamSize);
+        size_t k = localBeamSize;
+        std::vector<size_t> topWordScoresSizes(dimBatch, k);
+        //LOG(info, "wordScores->shape()[0]: {}, topWordScoresSizes.size(): {}, topWordScoresSizes[0]: {}, topWordScoresSizes[1]: {}", wordScores->shape()[0], topWordScoresSizes.size(), topWordScoresSizes[0], topWordScoresSizes[1]);
+        nth->getNBestList(topWordScoresSizes, wordScores->val(), topWordScoresVals, topWordScoresKeys, first);
+        /*for (size_t wi = 0; wi < topWordScoresKeys.size(); ++wi) {
+          topWordScoresKeys[wi] %= k;
+        }*/
+        //LOG(info, "topWordScoresVals: {}, {}, {}, {}", topWordScoresVals[0], topWordScoresVals[1], topWordScoresVals[2], topWordScoresVals[3]);
+        //LOG(info, "topWordScoresKeys {}, {}, {}, {}", topWordScoresKeys[0], topWordScoresKeys[1], topWordScoresKeys[2], topWordScoresKeys[3]);
+      }
 
       //**********************************************************************
       // perform beam search and pruning
@@ -281,7 +365,9 @@ public:
                      states,
                      localBeamSize,
                      first,
-                     batch);
+                     batch,
+                     topWordScoresKeys,
+                     topWordScoresVals);
 
       auto prunedBeams = pruneBeam(beams);
       for(int i = 0; i < dimBatch; ++i) {

@@ -55,7 +55,7 @@ std::vector<std::string> Vocab::operator()(const Words& sentence,
 }
 
 const std::string& Vocab::operator[](size_t id) const {
-  ABORT_IF(id >= id2str_.size(), "Unknown word id: ", id);
+  ABORT_IF(id >= id2str_.size(), "Unknown word id: {}, maximum id: {}", id, id2str_.size() - 1);
   return id2str_[id];
 }
 

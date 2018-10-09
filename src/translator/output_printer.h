@@ -20,7 +20,8 @@ public:
                    ? options->get<size_t>("beam-size")
                    : 0),
         alignment_(options->get<std::string>("alignment", "")),
-        alignmentThreshold_(getAlignmentThreshold(alignment_)) {}
+        alignmentThreshold_(getAlignmentThreshold(alignment_)),
+        outputWordScores_(options->get<size_t>("output-word-scores") > 0) {}
 
   template <class OStream>
   void print(Ptr<History> history, OStream& best1, OStream& bestn) {
@@ -49,6 +50,10 @@ public:
       float realScore = std::get<2>(result);
       bestn << " ||| " << realScore;
 
+      if (outputWordScores_) {
+        OutputWordScores(hypo, bestn);
+      }
+
       if(i < nbl.size() - 1)
         bestn << std::endl;
       else
@@ -65,6 +70,11 @@ public:
       const auto& hypo = std::get<1>(result);
       best1 << " ||| " << getAlignment(hypo);
     }
+
+    if (outputWordScores_) {
+      OutputWordScores(std::get<1>(result), best1);
+    }
+
     best1 << std::flush;
   }
 
@@ -74,6 +84,7 @@ private:
   size_t nbest_{0};
   std::string alignment_;
   float alignmentThreshold_{0.f};
+  bool outputWordScores_{false};
 
   std::string getAlignment(const Ptr<Hypothesis>& hyp);
 
@@ -82,6 +93,23 @@ private:
       return std::max(std::stof(str), 0.f);
     } catch(...) {
       return 0.f;
+    }
+  }
+
+  template <class OStream>
+  void OutputWordScores(Ptr<Hypothesis> hypo, OStream& ostream)
+  {
+    auto& vocabRef = *(vocab_);
+    ostream << " ||| word_scores: ";
+    auto translAltWordsScores = hypo->TracebackTranslationsWithAlternativeWordsWithScores();
+    for (size_t i = 0; i < translAltWordsScores.size(); ++i) {
+      auto curAltWordsScores = translAltWordsScores[i];
+      ostream << "[ ";
+      for (size_t j = 0; j < curAltWordsScores.size(); ++j) {
+        auto wordScore = curAltWordsScores[j];
+        ostream << vocabRef[std::get<0>(wordScore)] << " " << std::get<1>(wordScore) << " ";
+      }
+      ostream << "]";
     }
   }
 };

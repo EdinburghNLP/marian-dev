@@ -6,6 +6,10 @@
 
 namespace marian {
 
+typedef std::tuple<size_t, float> WordWithScore;
+typedef std::vector<WordWithScore> AlternativeWordsWithScores;
+typedef std::vector<AlternativeWordsWithScores> TranslationsWithAlternativeWordsWithScores;
+
 class Hypothesis {
 public:
   Hypothesis() : prevHyp_(nullptr), prevIndex_(0), word_(0), pathScore_(0.0) {}
@@ -13,8 +17,10 @@ public:
   Hypothesis(const Ptr<Hypothesis> prevHyp,
              size_t word,
              size_t prevIndex,
-             float pathScore)
-      : prevHyp_(prevHyp), prevIndex_(prevIndex), word_(word), pathScore_(pathScore) {}
+             float pathScore,
+             const std::vector<unsigned int> topWordScoresKeys,
+             const std::vector<float> topWordScoresVals)
+      : prevHyp_(prevHyp), prevIndex_(prevIndex), word_(word), pathScore_(pathScore), topWordScoresKeys_(topWordScoresKeys), topWordScoresVals_(topWordScoresVals) {}
 
   const Ptr<Hypothesis> GetPrevHyp() const { return prevHyp_; }
 
@@ -53,6 +59,23 @@ public:
       return align;
   }
 
+  // get translations with the top k alternative words at each position with log-probability
+  TranslationsWithAlternativeWordsWithScores TracebackTranslationsWithAlternativeWordsWithScores()
+  {
+      TranslationsWithAlternativeWordsWithScores rv;
+      for (auto hyp = this; hyp->GetPrevHyp(); hyp = hyp->GetPrevHyp().get()) {
+          AlternativeWordsWithScores currAltWwS;
+          for (size_t j = 0; j < hyp->topWordScoresKeys_.size(); ++j) {
+            WordWithScore wwS(hyp->topWordScoresKeys_[j], hyp->topWordScoresVals_[j]);
+            currAltWwS.push_back(wwS);
+          }
+          rv.push_back(currAltWwS);
+          // std::cerr << rv << " " << hyp << std::endl;
+      }
+      std::reverse(rv.begin(), rv.end());
+      return rv;
+  }
+
 private:
   const Ptr<Hypothesis> prevHyp_;
   const size_t prevIndex_;
@@ -61,6 +84,9 @@ private:
 
   std::vector<float> scoreBreakdown_;
   std::vector<float> alignment_;
+
+  std::vector<unsigned int> topWordScoresKeys_;
+  std::vector<float> topWordScoresVals_;
 };
 
 typedef std::vector<Ptr<Hypothesis>> Beam;                // Beam = vector of hypotheses
@@ -68,4 +94,5 @@ typedef std::vector<Beam> Beams;                          // Beams = vector of v
 typedef std::vector<size_t> Words;                        // Words = vector of word ids
 typedef std::tuple<Words, Ptr<Hypothesis>, float> Result; // (word ids for hyp, hyp, normalized sentence score for hyp)
 typedef std::vector<Result> NBestList;                    // sorted vector of (word ids, hyp, sent score) tuples
+
 }  // namespace marian
