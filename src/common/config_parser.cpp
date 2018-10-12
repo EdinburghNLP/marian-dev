@@ -436,6 +436,8 @@ void ConfigParser::addOptionsValidation(cli::CLIWrapper& cli) {
       "Allow unknown words to appear in output");
   cli.add<bool>("--n-best",
       "Generate n-best list");
+  cli.add<bool>("--output-path-scores",
+      "Output path scores for each word");
 
   // efficiency options
   cli.add<int>("--valid-mini-batch",
@@ -487,6 +489,8 @@ void ConfigParser::addOptionsTranslation(cli::CLIWrapper& cli) {
       "Allow unknown words to appear in output");
   cli.add<bool>("--n-best",
       "Generate n-best list");
+  cli.add<bool>("--output-path-scores",
+      "Output path scores for each word");
   cli.add_nondefault<std::string>("--alignment",
      "Return word alignment. Possible values: 0.0-1.0, hard, soft")
     ->implicit_val("1");
@@ -527,6 +531,8 @@ void ConfigParser::addOptionsScoring(cli::CLIWrapper& cli) {
       " If these files do not exists they are created");
   cli.add<bool>("--n-best",
       "Score n-best list instead of plain text corpus");
+  cli.add<bool>("--output-path-scores",
+      "Output path scores for each word");
   cli.add<std::string>("--n-best-feature",
       "Feature name to be inserted into n-best list", "Score");
   cli.add_nondefault<std::string>("--summary",

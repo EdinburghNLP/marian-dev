@@ -20,7 +20,8 @@ public:
                    ? options->get<size_t>("beam-size")
                    : 0),
         alignment_(options->get<std::string>("alignment", "")),
-        alignmentThreshold_(getAlignmentThreshold(alignment_)) {}
+        alignmentThreshold_(getAlignmentThreshold(alignment_)),
+        outputPathScores_(options->get<bool>("output-path-scores", false)) {}
 
   template <class OStream>
   void print(Ptr<History> history, OStream& best1, OStream& bestn) {
@@ -49,6 +50,10 @@ public:
       float realScore = std::get<2>(result);
       bestn << " ||| " << realScore;
 
+      if (outputPathScores_) {
+        OutputPathScores(hypo, bestn);
+      }
+
       if(i < nbl.size() - 1)
         bestn << std::endl;
       else
@@ -65,6 +70,12 @@ public:
       const auto& hypo = std::get<1>(result);
       best1 << " ||| " << getAlignment(hypo);
     }
+
+    if (outputPathScores_) {
+      const auto& hypo = std::get<1>(result);
+      OutputPathScores(hypo, best1);
+    }
+
     best1 << std::flush;
   }
 
@@ -74,6 +85,7 @@ private:
   size_t nbest_{0};
   std::string alignment_;
   float alignmentThreshold_{0.f};
+  bool outputPathScores_{false};
 
   std::string getAlignment(const Ptr<Hypothesis>& hyp);
 
@@ -82,6 +94,17 @@ private:
       return std::max(std::stof(str), 0.f);
     } catch(...) {
       return 0.f;
+    }
+  }
+
+  template <class OStream>
+  void OutputPathScores(Ptr<Hypothesis> hypo, OStream& ostream)
+  {
+    auto& vocabRef = *(vocab_);
+    ostream << " ||| path_scores: ";
+    auto pathScores = hypo->TracebackPathScores();
+    for (size_t i = 0; i < pathScores.size(); ++i) {
+      ostream << pathScores[i] << " ";
     }
   }
 };
