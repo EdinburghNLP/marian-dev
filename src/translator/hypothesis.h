@@ -53,6 +53,18 @@ public:
       return align;
   }
 
+  // get path scores for each word
+  std::vector<float> TracebackPathScores()
+  {
+      std::vector<float> pathScores;
+      for (auto hyp = this; hyp->GetPrevHyp(); hyp = hyp->GetPrevHyp().get()) {
+          pathScores.push_back(hyp->pathScore_);
+          // std::cerr << hyp->pathScore_ << " " << hyp << std::endl;
+      }
+      std::reverse(pathScores.begin(), pathScores.end());
+      return pathScores;
+  }
+
 private:
   const Ptr<Hypothesis> prevHyp_;
   const size_t prevIndex_;
