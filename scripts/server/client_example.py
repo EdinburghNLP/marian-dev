@@ -16,7 +16,7 @@ def add_empty_lines(text, positions, n_best, use_path_scores):
     targetId = 0
     sentenceId = 0
     addedEmptyLines = 0
-    for line in text.strip().split("\n"):
+    for line in text.decode('utf-8').strip().split("\n"):
         if sentenceId in indices:
             if (not n_best_mode):
                 output.append("")
