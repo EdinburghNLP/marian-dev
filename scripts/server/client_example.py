@@ -8,15 +8,23 @@ import argparse
 
 from websocket import create_connection
 
+def correctIdOffset(result, batchIdOffset):
+    output = []
+    for line in result.strip().split("\n"):
+        fields = line.split(" ||| ")
+        internalId = int(fields[0])
+        editedLine = " ||| ".join([str(internalId + batchIdOffset)] + fields[1:])
+        output.append(editedLine)
+    return "\n".join(output)
 
-def add_empty_lines(text, positions, n_best, use_path_scores):
+def add_empty_lines(result, positions, n_best, use_path_scores):
     n_best_mode = n_best >= 0
     output = []
     indices = set(positions)
     targetId = 0
     sentenceId = 0
     addedEmptyLines = 0
-    for line in text.decode('utf-8').strip().split("\n"):
+    for line in result.strip().split("\n"):
         if sentenceId in indices:
             if (not n_best_mode):
                 output.append("")
@@ -63,8 +71,7 @@ def add_empty_lines(text, positions, n_best, use_path_scores):
 
     return "\n".join(output)
 
-
-if __name__ == "__main__":
+def main():
     # handle command-line options
     parser = argparse.ArgumentParser()
     parser.add_argument("-b", "--batch-size", type=int, default=1)
@@ -80,6 +87,7 @@ if __name__ == "__main__":
     batch = ""
     empty_lines = []
     sentenceId = 0
+    batchIdOffset = 0
     for line in sys.stdin:
         text = line.decode('utf-8') if sys.version_info < (3, 0) else line
         if not text.strip():
@@ -92,11 +100,13 @@ if __name__ == "__main__":
         if count == args.batch_size:
             # translate the batch
             ws.send(batch)
-            result = ws.recv()
+            result = ws.recv().decode('utf-8')
+            result = correctIdOffset(result, batchIdOffset)
             if empty_lines:
                 result = add_empty_lines(result, empty_lines, args.n_best, args.use_path_scores)
-            print(result)
+            print(result.encode('utf-8'))
 
+            batchIdOffset = sentenceId
             count = 0
             batch = ""
             empty_lines = []
@@ -104,10 +114,15 @@ if __name__ == "__main__":
     if count:
         # translate the remaining sentences
         ws.send(batch)
-        result = ws.recv()
+        result = ws.recv().decode('utf-8')
+        result = correctIdOffset(result, batchIdOffset)
         if empty_lines:
             result = add_empty_lines(result, empty_lines, args.n_best, args.use_path_scores)
-        print(result)
+        print(result.encode('utf-8'))
 
     # close connection
     ws.close()
+
+if __name__ == "__main__":
+    main()
+
