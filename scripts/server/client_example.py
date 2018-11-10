@@ -90,10 +90,10 @@ def main():
     batchIdOffset = 0
     for line in sys.stdin:
         text = line.decode('utf-8') if sys.version_info < (3, 0) else line
-        if not text.strip():
-            empty_lines.append(sentenceId)
-            sentenceId += 1
-            continue
+        #if not text.strip():
+        #    empty_lines.append(sentenceId)
+        #    sentenceId += 1
+        #    continue
         count += 1
         sentenceId += 1
         batch += text
