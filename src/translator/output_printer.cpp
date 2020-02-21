@@ -35,4 +35,15 @@ std::string OutputPrinter::getWordScores(const Hypothesis::PtrType& hyp) {
   return scores.str();
 }
 
+std::string OutputPrinter::getPathScores(const Hypothesis::PtrType& hyp) {
+  std::ostringstream scores;
+  float sumScore = 0.0f;
+  scores.precision(5);
+  for(const auto& score : hyp->tracebackWordScores()) {
+    sumScore += score;
+    scores << " " << std::fixed << sumScore;
+  }
+  return scores.str();
+}
+
 }  // namespace marian
