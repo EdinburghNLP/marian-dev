@@ -39,6 +39,7 @@ public:
 
 // Simplest layer interface: Unary function
 struct IUnaryLayer {
+  virtual ~IUnaryLayer() {}
   virtual Expr apply(Expr) = 0;
   virtual Expr apply(const std::vector<Expr>& es) {
     ABORT_IF(es.size() > 1, "Not implemented"); // simple stub
@@ -59,6 +60,7 @@ struct IEmbeddingLayer {
 
   // alternative from indices directly
   virtual Expr applyIndices(const std::vector<WordIndex>& embIdx, const Shape& shape) const = 0;
+  virtual ~IEmbeddingLayer() {}
 };
 
 // base class for Encoder and Decoder classes, which have embeddings and a batch index (=stream index)
@@ -226,6 +228,12 @@ public:
   Expr apply(Expr input) override { return apply(std::vector<Expr>({input})); }
 };
 
+} // namespace mlp
+
+class LSH;
+
+namespace mlp {
+
 class Output : public LayerBase, public IUnaryLogitLayer, public IHasShortList {
 private:
   // parameters held by this layer
@@ -237,10 +245,11 @@ private:
   Expr cachedShortb_;   // these match the current value of shortlist_
   Expr cachedShortLemmaEt_;
   Ptr<FactoredVocab> factoredVocab_;
-
+  
   // optional parameters set/updated after construction
   Expr tiedParam_;
   Ptr<data::Shortlist> shortlist_;
+  Ptr<LSH> lsh_;
 
   void lazyConstruct(int inputDim);
 public:

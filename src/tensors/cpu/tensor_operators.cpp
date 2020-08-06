@@ -20,18 +20,25 @@ namespace marian {
 
 namespace cpu {
 
-void IsNaN(const Tensor in, Ptr<Allocator> allocator, bool& /*isNaN*/, bool& /*isInf*/) {
+  void IsNaN(const Tensor /*in*/, Ptr<Allocator> /*allocator*/, bool& /*isNaN*/, bool& /*isInf*/) {
   ABORT("Not implemented");
 }
 
 template <typename To, typename From>
 void CopyCastTo(To* out, const From* in, int length) {
   for(int i = 0; i < length; ++i)
-    out[i] = in[i];
+#ifdef _MSC_VER
+#pragma warning (push)
+#pragma warning (disable: 4244)  // 'argument': conversion from 'const From' to 'float', possible loss of data
+#endif
+    out[i] = (To)in[i];
+#ifdef _MSC_VER
+#pragma warning (pop)
+#endif
 }
 
 // Casting has been factored into two functions "CopyCastFrom" and
-// "CopyCastTo". This only serves the purpuse to autmatically create
+// "CopyCastTo". This only serves the purpuse to automatically create
 // the full Carthesian product of possible type cast via template magic.
 // Extending CopyCast and CopyCastFrom with a new branch in the "if" clause
 // adds all possible variants.
@@ -52,6 +59,8 @@ void CopyCast(Tensor out, const Tensor in) {
     CopyCastFrom(out, in->data<float>(), (int)in->size());
   } else if(in->type() == Type::float16) {
     CopyCastFrom(out, in->data<float16>(), (int)in->size());
+  } else if(in->type() == Type::uint32) {
+    CopyCastFrom(out, in->data<uint32_t>(), (int)in->size());
   } else {
     ABORT("CopyCastFrom from type {} not implemented", in->type());
   }
@@ -77,6 +86,7 @@ void ConcatCont(Tensor out, const std::vector<Tensor>& inputs, int axis) {
   }
 }
 
+template <bool add>
 inline void gInsertCols(float* out,
                         const float* in,
                         size_t rows,
@@ -84,13 +94,15 @@ inline void gInsertCols(float* out,
                         size_t cols_out,
                         size_t cols_in,
                         size_t offset_out,
-                        size_t offset_in,
-                        float beta) {
+                        size_t offset_in) {
   for(size_t j = 0; j < rows; ++j) {
     float* rowOut = out + j * cols_out + offset_out;
     const float* rowIn = in + j * cols_in + offset_in;
     for(size_t i = 0; i < cols; ++i) {
-      rowOut[i] = rowIn[i] + beta * rowOut[i];
+      if(add) // this was solved earlier via beta * rowOut[i] with beta in {0,1} but 0 * nan in uninitialized tensors will result in nan.
+        rowOut[i] += rowIn[i];
+      else
+        rowOut[i]  = rowIn[i];
     }
   }
 }
@@ -105,21 +117,20 @@ void Concatenate1(Tensor out, const std::vector<Tensor>& inputs) {
     ABORT_IF(rows != in->shape().elements() / in->shape().back(),
              "First dimension must be equal");
     int cols_in = in->shape().back();
-    cpu::gInsertCols(out->data(),
-                     in->data(),
-                     rows,
-                     cols_in,
-                     cols_out,
-                     cols_in,
-                     offset,
-                     0,
-                     0);
+    cpu::gInsertCols<false>(out->data(),
+                            in->data(),
+                            rows,
+                            cols_in,
+                            cols_out,
+                            cols_in,
+                            offset,
+                            0);
     offset += cols_in;
   }
 }
 
 void Concatenate(Tensor out, const std::vector<Tensor>& inputs, int ax) {
-  if(ax == (int)out->shape().size() - 1)
+   if(ax == (int)out->shape().size() - 1)
     Concatenate1(out, inputs);
   else
     ConcatCont(out, inputs, ax);
@@ -136,15 +147,14 @@ void Split1(std::vector<Tensor>& outputs, const Tensor in) {
 
     // set last parameter to 1 to enable += instead of =
     // @TODO: do this in a more principled ways accross all/most kernels
-    cpu::gInsertCols(out->data(),
-                     in->data(),
-                     rows,
-                     cols_out,
-                     cols_out,
-                     cols_in,
-                     0,
-                     offset,
-                     1);
+    cpu::gInsertCols<true>(out->data(),
+                           in->data(),
+                           rows,
+                           cols_out,
+                           cols_out,
+                           cols_in,
+                           0,
+                           offset);
     offset += cols_out;
   }
 }
@@ -214,9 +224,11 @@ void Transpose0213(Tensor out, Tensor in) {
   }
 }
 
+// This function is called only when MKL is available.
+#if MKL_FOUND
 // Given a 4D array, transpose (swap) the initial 3 dimensions while keeping the last dimension.
 // e.g. 1234 --> 2134, 1234 --> 3214 (4 is always kept).
-// This is an optimized version for swapping first 3 dimensions 
+// This is an optimized version for swapping first 3 dimensions
 // assuming the last dimension is large enough to get benefits from vectorized copy.
 //
 // @param out output tensor
@@ -225,14 +237,13 @@ void Transpose0213(Tensor out, Tensor in) {
 template <bool add>
 void TransposeFirst3In4(Tensor out, Tensor in, const std::vector<int>& vAxis) {
   ABORT_IF(vAxis.size() != 4, "This function handles only 4D arrays.");
-#if MKL_FOUND
   int innermost = in->shape()[-1];
 
   int l1 = in->shape()[vAxis[0]];
   int l2 = in->shape()[vAxis[1]];
   int l3 = in->shape()[vAxis[2]];
 
-  // find the mapping between the transposed output dimensional indices (oi, oj, ok) 
+  // find the mapping between the transposed output dimensional indices (oi, oj, ok)
   // and original input dimensional indices (i, j, k)
   int oi, oj, ok;
 #pragma omp parallel for
@@ -275,11 +286,8 @@ void TransposeFirst3In4(Tensor out, Tensor in, const std::vector<int>& vAxis) {
       }
     }
   }
-#else
-  // it shouldn't come into here. This function is called only when MKL is available.
-  ABORT("Should not get here");
-#endif  // MKL_FOUND
 }
+#endif  // MKL_FOUND
 
 inline void transpose4x4_SSE(const float* A,
                              float* B,
@@ -646,17 +654,20 @@ void PasteCols(Tensor out_,
   }
 }
 
+#if 0 // this version seems to actually be buggy, but also not used in decoding?
 // Optimized version of Select for axis=2
 // @TODO: make this generally fast without this special version
 void SelectAxis2(Tensor out,
              const Tensor in,
              const Tensor indices) {
 
+  std::cerr << indices->debug() << std::endl;
+
   matchOrAbort<IndexType>(indices->type());
 
   functional::Shape outShape = out->shape();
   functional::Shape inShape = in->shape();
-  
+
   auto idxData = indices->data<IndexType>();
   auto odata = out->data();
   const auto idata = in->data();
@@ -676,6 +687,7 @@ void SelectAxis2(Tensor out,
     }
   }
 }
+#endif
 
 void Select(Tensor out,
             const Tensor in,
@@ -693,8 +705,10 @@ void Select(Tensor out,
   functional::Array<int, functional::Shape::size()> dims;
   int axisCPU = (int)(axis + functional::Shape::size() - out->shape().size());
 
+#if 0 // buggy but not really used?
   if(axisCPU == 2 && outShape == idxShape) // specialization for axis==2 when there is no broadcasting, @TODO to be removed once we have a faster implementation below
     return SelectAxis2(out, in, indices);
+#endif
 
   for(int index = 0; index < length; ++index) {
     outShape.dims(index, dims);                                // compute dimension-based indices from global index;
@@ -1018,19 +1032,15 @@ void AttBack(Tensor gVa_,
   }
 }
 
-void LayerNormalization(Tensor out_,
-                        Tensor in_,
-                        Tensor gamma_,
-                        Tensor beta_,
-                        float eps) {
-  float* out = out_->data();
-  const float* in = in_->data();
-  const float* alpha = gamma_->data();
-  const float* beta = beta_ ? beta_->data() : nullptr;
-
-  int rows = in_->shape().elements() / in_->shape().back();
-  int cols = in_->shape().back();
-
+MARIAN_FFAST_MATH_BEGIN
+template <int alphaStride, int betaStride, bool hasBeta>
+void LayerNormalizationImpl(float* out,
+                            const float* in,
+                            const float* alpha,
+                            const float* beta,
+                            float eps,
+                            int rows,
+                            int cols) {
 #pragma omp parallel for
   for(int j = 0; j < rows; ++j) {
     float* so = out + j * cols;
@@ -1054,16 +1064,55 @@ void LayerNormalization(Tensor out_,
 
 #pragma omp simd
     for(int i = 0; i < cols; ++i) {
-      float t = alpha[i] * ((sp[i] - mean) / sigma);
-      if(beta != nullptr) {
-        t += beta[i];
-      }
+      float t = alpha[alphaStride * i] * ((sp[i] - mean) / sigma);
+      if(hasBeta)
+        t += beta[betaStride * i];
 
       so[i] = t;
     }
   }
 }
+MARIAN_FFAST_MATH_END
 
+template <int alphaStride>
+inline void LayerNormalizationDispatchBeta(float* out,
+                                           const float* in,
+                                           const float* alpha,
+                                           Tensor beta,
+                                           float eps,
+                                           int rows,
+                                           int cols) {
+  if (beta) {
+    if (beta->shape().back() > 1) {
+      LayerNormalizationImpl<alphaStride, 1, true>(out, in, alpha, beta->data(), eps, rows, cols);
+    } else {
+      LayerNormalizationImpl<alphaStride, 0, true>(out, in, alpha, beta->data(), eps, rows, cols);
+    }
+  } else {
+    LayerNormalizationImpl<alphaStride, 0, false>(out, in, alpha, nullptr, eps, rows, cols);
+  }
+}
+
+void LayerNormalization(Tensor out_,
+                        Tensor in_,
+                        Tensor gamma_,
+                        Tensor beta,
+                        float eps) {
+  float* out = out_->data();
+  const float* in = in_->data();
+  const float* alpha = gamma_->data();
+  const int alphaStride = gamma_->shape().back() > 1;  // broadcasting for alpha and beta
+
+  int rows = in_->shape().elements() / in_->shape().back();
+  int cols = in_->shape().back();
+  if (alphaStride == 0) {
+    LayerNormalizationDispatchBeta<0>(out, in, alpha, beta, eps, rows, cols);
+  } else {
+    LayerNormalizationDispatchBeta<1>(out, in, alpha, beta, eps, rows, cols);
+  }
+}
+
+MARIAN_FFAST_MATH_BEGIN
 void LayerNormalizationGrad(Tensor gradX_,
                             Tensor gradGamma_,
                             Tensor gradBeta_,
@@ -1081,6 +1130,10 @@ void LayerNormalizationGrad(Tensor gradX_,
   float* x = x_->data();
   float* gamma = gamma_->data();
   float* beta = beta_ ? beta_->data() : nullptr;
+  // @TODO: The CPU implementation supports scalar gamma and beta. This is a left-over,
+  //        we should enable that in the GPU version as well.
+  const int gammaStride = gamma_->shape().back() > 1;  // broadcasting for alpha and beta. 0 means it's a scalar
+  const int betaStride = beta_ && beta_->shape().back() > 1;
 
   size_t rows = y_->shape().elements() / y_->shape()[-1];
   size_t cols = y_->shape()[-1];
@@ -1101,7 +1154,7 @@ void LayerNormalizationGrad(Tensor gradX_,
 #pragma omp simd reduction(+ : sum_x, sum_adj_x, sum_adj)
       for(size_t i = 0; i < cols; ++i) {
         sum_x += xRow[i];
-        sum_adj_x += adjRow[i] * (yRow[i] - (beta ? beta[i] : 0.f)) / gamma[i];
+        sum_adj_x += adjRow[i] * (yRow[i] - (beta ? beta[betaStride * i] : 0.f)) / gamma[gammaStride * i];
         sum_adj += adjRow[i];
       }
 
@@ -1116,15 +1169,15 @@ void LayerNormalizationGrad(Tensor gradX_,
 #pragma omp simd
       for(size_t i = 0; i < cols; ++i) {
         float grad_x = 0.f;
-        float x_hat = (yRow[i] - beta[i]) / gamma[i];
+        float x_hat = (yRow[i] - beta[betaStride * i]) / gamma[gammaStride * i];
         grad_x += cols * adjRow[i];
         grad_x -= sum_adj;
         grad_x -= sum_adj_x * x_hat;
         grad_x /= cols * sigma;
 
-        gradXRow[i] += gamma[i] * grad_x;
-        gradGamma[i] += adjRow[i] * x_hat;
-        gradBeta[i] += adjRow[i];
+        gradXRow[i] += gamma[gammaStride * i] * grad_x;
+        gradGamma[gammaStride * i] += adjRow[i] * x_hat;
+        gradBeta[betaStride * i] += adjRow[i];
       }
     }
   } else {
@@ -1143,7 +1196,8 @@ void LayerNormalizationGrad(Tensor gradX_,
 #pragma omp simd reduction(+ : sum_x, sum_adj_x, sum_adj)
       for(size_t i = 0; i < cols; ++i) {
         sum_x += xRow[i];
-        sum_adj_x += adjRow[i] * (yRow[i] - (beta ? beta[i] : 0.f)) / gamma[i];
+        sum_adj_x += adjRow[i] * (yRow[i] - (beta ? beta[betaStride * i] : 0.f)) / gamma[gammaStride * i];
+        // @TODO: beta is NULL here            ^^
         sum_adj += adjRow[i];
       }
 
@@ -1158,25 +1212,26 @@ void LayerNormalizationGrad(Tensor gradX_,
 #pragma omp simd
       for(size_t i = 0; i < cols; ++i) {
         float grad_x = 0.f;
-        float x_hat = yRow[i] / gamma[i];
+        float x_hat = yRow[i] / gamma[gammaStride * i];
         grad_x += cols * adjRow[i];
         grad_x -= sum_adj;
         grad_x -= sum_adj_x * x_hat;
         grad_x /= cols * sigma;
 
-        gradXRow[i] += gamma[i] * grad_x;
-        gradGamma[i] += adjRow[i] * x_hat;
+        gradXRow[i] += gamma[gammaStride * i] * grad_x;
+        gradGamma[gammaStride * i] += adjRow[i] * x_hat;
       }
     }
   }
 }
+MARIAN_FFAST_MATH_END
 
 void Shift(Tensor out_,
            Tensor in_,
            marian::Shape shift,
            float padValue,
            bool invert) {
-  int offset = 0;
+  int offset = 0; // out[i + offset] = in[i]; shift>0 inserts values at front, shifts back, pushes out
   for(int i = 0; i < shift.size(); ++i)
     offset += in_->shape().stride(i) * shift[i];
 

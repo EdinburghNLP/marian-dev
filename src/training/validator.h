@@ -36,6 +36,7 @@ protected:
 
 public:
   ValidatorBase(bool lowerIsBetter) : lowerIsBetter_(lowerIsBetter), lastBest_{initScore()} {}
+  virtual ~ValidatorBase() {}
 
   virtual float validate(const std::vector<Ptr<ExpressionGraph>>& graphs,
                          Ptr<const TrainingState> state) = 0;
@@ -51,6 +52,7 @@ public:
 template <class DataSet, class BuilderType> // @TODO: BuilderType doesn't really serve a purpose here? Review and remove.
 class Validator : public ValidatorBase {
 public:
+  virtual ~Validator() {}
   Validator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options, bool lowerIsBetter = true)
       : ValidatorBase(lowerIsBetter),
         vocabs_(vocabs),
@@ -64,8 +66,13 @@ public:
       options_->set("max-length", options_->get<size_t>("valid-max-length"));
       options_->set("max-length-crop", true); // @TODO: make this configureable
     }
-    if(options_->has("valid-mini-batch"))
+
+    // @TODO: make this work with mini-batch-fit etc.
+    if(options_->has("valid-mini-batch")) {
       options_->set("mini-batch", options_->get<size_t>("valid-mini-batch"));
+      options_->set("mini-batch-words", 0);
+    }
+
     options_->set("mini-batch-sort", "src");
     options_->set("maxi-batch", 10);
   }
@@ -137,6 +144,7 @@ class CrossEntropyValidator : public Validator<data::Corpus, models::ICriterionF
 
 public:
   CrossEntropyValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options);
+  virtual ~CrossEntropyValidator() {}
 
   std::string type() override { return options_->get<std::string>("cost-type"); }
 
@@ -148,6 +156,7 @@ protected:
 class AccuracyValidator : public Validator<data::Corpus, models::IModel> {
 public:
   AccuracyValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options);
+  virtual ~AccuracyValidator() {}
 
   std::string type() override { return "accuracy"; }
 
@@ -161,6 +170,7 @@ private:
 
 public:
   BertAccuracyValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options, bool evalMaskedLM);
+  virtual ~BertAccuracyValidator() {}
 
   std::string type() override {
     if(evalMaskedLM_)
@@ -177,6 +187,7 @@ protected:
 class ScriptValidator : public Validator<data::Corpus, models::IModel> {
 public:
   ScriptValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options);
+  virtual ~ScriptValidator() {}
 
   virtual float validate(const std::vector<Ptr<ExpressionGraph>>& graphs,
                          Ptr<const TrainingState> /*ignored*/) override;
@@ -193,6 +204,7 @@ protected:
 class TranslationValidator : public Validator<data::Corpus, models::IModel> {
 public:
   TranslationValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options);
+  virtual ~TranslationValidator() {}
 
   virtual float validate(const std::vector<Ptr<ExpressionGraph>>& graphs,
                          Ptr<const TrainingState> state) override;
@@ -212,6 +224,7 @@ protected:
 class BleuValidator : public Validator<data::Corpus, models::IModel> {
 public:
   BleuValidator(std::vector<Ptr<Vocab>> vocabs, Ptr<Options> options, bool detok = false);
+  virtual ~BleuValidator() {}
 
   virtual float validate(const std::vector<Ptr<ExpressionGraph>>& graphs,
                          Ptr<const TrainingState> state) override;

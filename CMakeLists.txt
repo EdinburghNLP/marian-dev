@@ -24,6 +24,7 @@ option(USE_CCACHE "Use ccache compiler cache (https://ccache.dev)" OFF)
 option(USE_CUDNN "Use CUDNN library" OFF)
 option(USE_DOXYGEN "Build documentation with Doxygen" ON)
 option(USE_FBGEMM "Use FBGEMM" OFF)
+option(USE_MKL "Compile with MKL support" ON)
 option(USE_MPI "Use MPI library" OFF)
 option(USE_NCCL "Use NCCL library" ON)
 option(USE_SENTENCEPIECE "Download and compile SentencePiece" OFF)
@@ -33,7 +34,7 @@ option(USE_STATIC_LIBS "Link statically against non-system libs" OFF)
 if(USE_CCACHE)
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
-  message(STATUS "Found and will be using ccache for faster repeat compilation (use cmake -DUSE_CCACHE=off to disable).")
+  message(STATUS "Will be using ccache for faster repeat compilation (use cmake -DUSE_CCACHE=off to disable).")
   set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
 else(CCACHE_PROGRAM)
   message(WARNING "Compilation with ccache requested but no ccache found.")
@@ -50,25 +51,30 @@ message(STATUS "Project version: ${PROJECT_VERSION_STRING_FULL}")
 execute_process(COMMAND git submodule update --init --recursive --no-fetch
                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Note that with CMake MSVC build, the option CMAKE_BUILD_TYPE is automatically derived from the key
+# 'configurationType' in CMakeSettings.json configurations
 if(NOT CMAKE_BUILD_TYPE)
   message(WARNING "CMAKE_BUILD_TYPE not set; setting to Release")
   set(CMAKE_BUILD_TYPE "Release")
 endif()
 
+###############################################################################
 # Set compilation flags
 if(MSVC)
 # These are used in src/CMakeLists.txt on a per-target basis
   list(APPEND ALL_WARNINGS /WX; /W4;)
 
-  # Disabled bogus warnings for CPU intrincics:
+  # Disabled bogus warnings for CPU intrinsics:
   # C4310: cast truncates constant value
   # C4324: 'marian::cpu::int16::`anonymous-namespace'::ScatterPut': structure was padded due to alignment specifier
-  set(DISABLE_GLOBALLY "/wd\"4310\" /wd\"4324\"")
+  # C4702: unreachable code; note it is also disabled globally in the VS project file
+  set(DISABLE_GLOBALLY "/wd\"4310\" /wd\"4324\" /wd\"4702\"")
 
-  set(INTRINSICS "/arch:AVX")
+  # set(INTRINSICS "/arch:AVX")
+  add_definitions(-DUSE_SSE2=1)
 
   # Or maybe use these?
-  # set(INTRINSICS "/arch:AVX2")
+  set(INTRINSICS "/arch:AVX2")
   # set(INTRINSICS "/arch:AVX512")
 
   set(CMAKE_CXX_FLAGS           "/EHsc /DWIN32 /D_WINDOWS /DUNICODE /D_UNICODE /D_CRT_NONSTDC_NO_WARNINGS /D_CRT_SECURE_NO_WARNINGS ${DISABLE_GLOBALLY}")
@@ -76,7 +82,9 @@ if(MSVC)
   set(CMAKE_CXX_FLAGS_DEBUG     "${CMAKE_CXX_FLAGS} /MTd /Od /Ob0 ${INTRINSICS} /RTC1 /Zi /D_DEBUG")
 
   # ignores warning LNK4049: locally defined symbol free imported - this comes from zlib
-  set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS} /DEBUG /LTCG:incremental /INCREMENTAL:NO /NODEFAULTLIB:MSVCRT /ignore:4049")
+  set(CMAKE_EXE_LINKER_FLAGS    "${CMAKE_EXE_LINKER_FLAGS} /DEBUG /LTCG:incremental /INCREMENTAL:NO /ignore:4049")
+  set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRT")
+  set(CMAKE_EXE_LINKER_FLAGS_DEBUG   "${CMAKE_EXE_LINKER_FLAGS} /NODEFAULTLIB:MSVCRTD")
   set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} /LTCG:incremental")
 
   find_library(SHLWAPI Shlwapi.lib)
@@ -141,37 +149,50 @@ else(MSVC)
     add_definitions(-DUSE_FBGEMM=1)
   endif(USE_FBGEMM)
 
-  set(DISABLE_GLOBALLY "-Wno-unused-result")
+  if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 9.0)
+    # Clang-10.0.0 complains when CUDA is newer than 10.1
+    set(CLANG_IGNORE_UNKNOWN_CUDA "-Wno-unknown-cuda-version")
+  endif()
+  set(DISABLE_GLOBALLY "-Wno-unused-result -Wno-unknown-warning-option ${CLANG_IGNORE_UNKNOWN_CUDA}")
 
   # These are used in src/CMakeLists.txt on a per-target basis
-  list(APPEND ALL_WARNINGS -Wall; -Werror; -Wno-unused-result; -Wno-deprecated; -Wno-pragmas; -Wno-unused-parameter; -Wextra; -Wno-unused-function;
-                          -Wno-unused-value; -Wno-unknown-pragmas; -Wno-sign-compare; -Wno-missing-field-initializers;)
+  list(APPEND ALL_WARNINGS -Wall; -Werror; -Wextra; -Wno-unused-result; -Wno-deprecated;
+    -Wno-pragmas; -Wno-unused-parameter; -Wno-unused-function;
+    -Wno-unused-value; -Wno-unknown-pragmas; -Wno-sign-compare;
+    -Wno-missing-field-initializers;)
 
   # This warning does not exist prior to gcc 5.0
   if(CMAKE_COMPILER_IS_GNUCC AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 5.0)
-    list(APPEND ALL_WARNINGS -Wsuggest-override)
+    list(APPEND ALL_WARNINGS -Wsuggest-override -Wno-int-in-bool-context)
   endif()
 
-  set(CMAKE_CXX_FLAGS                 "-std=c++11 -pthread -Wl,--no-as-needed -fPIC ${DISABLE_GLOBALLY} -march=${BUILD_ARCH} ${INTRINSICS}")
-  set(CMAKE_CXX_FLAGS_RELEASE         "-Ofast -m64 -funroll-loops -ffinite-math-only -g -rdynamic")
-  set(CMAKE_CXX_FLAGS_DEBUG           "-O0 -g -rdynamic")
-  set(CMAKE_CXX_FLAGS_SLIM            "-Ofast -m64 -funroll-loops -ffinite-math-only -DNDEBUG")
+  if(CMAKE_COMPILER_IS_GNUCC)
+    # these flags are not known to clang
+    set(CMAKE_GCC_FLAGS "-Wl,--no-as-needed")
+    set(CMAKE_RDYNAMIC_FLAG "-rdynamic")
+  endif(CMAKE_COMPILER_IS_GNUCC)
+
+  set(CMAKE_CXX_FLAGS                 "-std=c++11 -pthread ${CMAKE_GCC_FLAGS} -fPIC ${DISABLE_GLOBALLY} -march=${BUILD_ARCH} ${INTRINSICS}")
+  set(CMAKE_CXX_FLAGS_RELEASE         "-O3 -m64 -funroll-loops -g ${CMAKE_RDYNAMIC_FLAG}")
+  set(CMAKE_CXX_FLAGS_DEBUG           "-O0 -g ${CMAKE_RDYNAMIC_FLAG}")
+  set(CMAKE_CXX_FLAGS_SLIM            "-O3 -m64 -funroll-loops -DNDEBUG")
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO  "${CMAKE_CXX_FLAGS_RELEASE}")
   set(CMAKE_CXX_FLAGS_PROFILE         "${CMAKE_CXX_FLAGS_RELEASE} -pg")
   set(CMAKE_CXX_FLAGS_PROFGEN         "${CMAKE_CXX_FLAGS_RELEASE} -fprofile-generate -fprofile-correction")
   set(CMAKE_CXX_FLAGS_PROFUSE         "${CMAKE_CXX_FLAGS_RELEASE} -fprofile-use -fprofile-correction")
 
   # these need to be set separately
-  set(CMAKE_C_FLAGS                 "-pthread -Wl,--no-as-needed -fPIC ${DISABLE_GLOBALLY} -march=${BUILD_ARCH} ${INTRINSICS}")
-  set(CMAKE_C_FLAGS_RELEASE         "-O3 -m64 -funroll-loops -ffinite-math-only -g -rdynamic")
-  set(CMAKE_C_FLAGS_DEBUG           "-O0 -g -rdynamic")
-  set(CMAKE_C_FLAGS_SLIM            "-O3 -m64 -funroll-loops -ffinite-math-only -DNDEBUG")
+  set(CMAKE_C_FLAGS                 "-pthread ${CMAKE_GCC_FLAGS} -fPIC ${DISABLE_GLOBALLY} -march=${BUILD_ARCH} ${INTRINSICS}")
+  set(CMAKE_C_FLAGS_RELEASE         "-O3 -m64 -funroll-loops -g ${CMAKE_RDYNAMIC_FLAG}")
+  set(CMAKE_C_FLAGS_DEBUG           "-O0 -g ${CMAKE_RDYNAMIC_FLAG}")
+  set(CMAKE_C_FLAGS_SLIM            "-O3 -m64 -funroll-loops -DNDEBUG")
   set(CMAKE_C_FLAGS_RELWITHDEBINFO  "${CMAKE_C_FLAGS_RELEASE}")
   set(CMAKE_C_FLAGS_PROFILE         "${CMAKE_C_FLAGS_RELEASE} -pg")
   set(CMAKE_C_FLAGS_PROFGEN         "${CMAKE_C_FLAGS_RELEASE} -fprofile-generate -fprofile-correction")
   set(CMAKE_C_FLAGS_PROFUSE         "${CMAKE_C_FLAGS_RELEASE} -fprofile-use -fprofile-correction")
 endif(MSVC)
 
+###############################################################################
 # Downloading SentencePiece if requested and set to compile with it.
 # Requires all the dependencies imposed by SentencePiece
 if(USE_SENTENCEPIECE)
@@ -180,14 +201,23 @@ if(USE_SENTENCEPIECE)
   set(EXT_LIBS ${EXT_LIBS} sentencepiece sentencepiece_train)
 endif()
 
+if(USE_ONNX)
+  message(STATUS "Enabling experimental ONNX support")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_ONNX")
+  set(EXT_LIBS ${EXT_LIBS} protobuf)
+endif()
+
 # Find packages
 set(EXT_LIBS ${EXT_LIBS} ${CMAKE_DL_LIBS})
 
+###############################################################################
 if(COMPILE_CUDA)
 
 if(USE_STATIC_LIBS)
   # link statically to stdlib libraries
-  set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
+  if(NOT MSVC)
+    set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
+  endif()
 
   # look for libraries that have .a suffix
   set(_ORIG_CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
@@ -204,7 +234,7 @@ if(CUDA_FOUND)
   if((CUDA_VERSION VERSION_EQUAL "10.0" OR CUDA_VERSION VERSION_GREATER "10.0") AND (CMAKE_VERSION VERSION_LESS "3.12.2"))
       message(WARNING "On some Unix systems CUDA 10.0+ requires CMake 3.12.2+; you use CMake ${CMAKE_VERSION}")
   endif()
-  
+
   if(COMPILE_CUDA_SM35)
     LIST(APPEND COMPUTE -arch=sm_35; -gencode=arch=compute_35,code=sm_35;)                             # Tesla K40 and above
   endif(COMPILE_CUDA_SM35)
@@ -219,12 +249,22 @@ if(CUDA_FOUND)
   endif(COMPILE_CUDA_SM70)
 
   if(USE_STATIC_LIBS)
-    find_library(CUDA_culibos_LIBRARY NAMES culibos PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
-    set(EXT_LIBS ${EXT_LIBS} ${CUDA_curand_LIBRARY} ${CUDA_cusparse_LIBRARY} ${CUDA_culibos_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
-    set(CUDA_LIBS ${CUDA_curand_LIBRARY} ${CUDA_cusparse_LIBRARY} ${CUDA_culibos_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+    set(EXT_LIBS ${EXT_LIBS} ${CUDA_curand_LIBRARY} ${CUDA_cusparse_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+    set(CUDA_LIBS ${CUDA_curand_LIBRARY} ${CUDA_cusparse_LIBRARY} ${CUDA_CUBLAS_LIBRARIES})
+    find_library(CUDA_culibos_LIBRARY NAMES culibos PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
+    # The cuLIBOS library does not seem to exist in Windows CUDA toolkit installs
+    if(CUDA_culibos_LIBRARY)
+      set(EXT_LIBS ${EXT_LIBS} ${CUDA_culibos_LIBRARY})
+      set(CUDA_LIBS ${CUDA_LIBS} ${CUDA_culibos_LIBRARY})
+    elseif(NOT WIN32)
+      message(FATAL_ERROR "cuLIBOS library not found")
+    endif()
     # CUDA 10.1 introduces cublasLt library that is required on static build
     if ((CUDA_VERSION VERSION_EQUAL "10.1" OR CUDA_VERSION VERSION_GREATER "10.1"))
-      find_library(CUDA_cublasLt_LIBRARY NAMES cublasLt PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+      find_library(CUDA_cublasLt_LIBRARY NAMES cublasLt PATHS ${CUDA_TOOLKIT_ROOT_DIR}/lib64 ${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
+      if(NOT CUDA_cublasLt_LIBRARY)
+        message(FATAL_ERROR "cuBLASLt library not found")
+      endif()
       set(EXT_LIBS ${EXT_LIBS} ${CUDA_cublasLt_LIBRARY})
       set(CUDA_LIBS ${CUDA_LIBS} ${CUDA_cublasLt_LIBRARY})
     endif()
@@ -288,7 +328,7 @@ if(NOT MSVC)
   list(APPEND CUDA_NVCC_FLAGS -ccbin ${CMAKE_C_COMPILER}; -std=c++11; -Xcompiler\ -fPIC; -Xcompiler\ -Wno-unused-result; -Xcompiler\ -Wno-deprecated; -Xcompiler\ -Wno-pragmas; -Xcompiler\ -Wno-unused-value; -Xcompiler\ -Werror;)
   list(APPEND CUDA_NVCC_FLAGS ${INTRINSICS_NVCC})
 else()
-  list(APPEND CUDA_NVCC_FLAGS -Xcompiler\ /FS; )
+  list(APPEND CUDA_NVCC_FLAGS -Xcompiler\ /FS; -Xcompiler\ /MT$<$<CONFIG:Debug>:d>; )
 endif()
 
 list(REMOVE_DUPLICATES CUDA_NVCC_FLAGS)
@@ -303,6 +343,8 @@ if(USE_STATIC_LIBS)
   endif()
 endif()
 
+###############################################################################
+# Find Tcmalloc
 if(NOT WIN32)
   find_package(Tcmalloc)
   if(Tcmalloc_FOUND)
@@ -313,6 +355,8 @@ if(NOT WIN32)
   endif(Tcmalloc_FOUND)
 endif()
 
+###############################################################################
+# Find MPI
 if(USE_MPI)
   find_package(MPI 2.0)
   if(MPI_FOUND)
@@ -322,14 +366,19 @@ if(USE_MPI)
   endif(MPI_FOUND)
 endif(USE_MPI)
 
+###############################################################################
+# Find MKL
 if(COMPILE_CPU)
-  find_package(MKL)
+  if(USE_MKL)
+    find_package(MKL)
+  endif(USE_MKL)
   if(MKL_FOUND)
     include_directories(${MKL_INCLUDE_DIR})
     set(EXT_LIBS ${EXT_LIBS} ${MKL_LIBRARIES})
+    set(BLAS_FOUND TRUE)
     add_definitions(-DBLAS_FOUND=1 -DMKL_FOUND=1)
   else(MKL_FOUND)
-    set(BLA_VENDOR "OpenBLAS")
+    set(BLAS_VENDOR "OpenBLAS")
     find_package(BLAS)
     if(BLAS_FOUND)
       include(FindCBLAS)
@@ -342,6 +391,8 @@ if(COMPILE_CPU)
   endif(MKL_FOUND)
 endif(COMPILE_CPU)
 
+###############################################################################
+# Find OpenSSL
 set(BOOST_COMPONENTS "")
 if(COMPILE_SERVER)
   find_package(OpenSSL)
@@ -360,10 +411,13 @@ if(USE_STATIC_LIBS)
   set(CMAKE_FIND_LIBRARY_SUFFIXES ${_ORIG_CMAKE_FIND_LIBRARY_SUFFIXES})
 endif()
 
+# TODO: move inside if(BOOST_COMPONENTS) ?
 if(USE_STATIC_LIBS)
   set(Boost_USE_STATIC_LIBS ON)
 endif()
 
+###############################################################################
+# Find Boost if required
 if(BOOST_COMPONENTS)
   find_package(Boost COMPONENTS ${BOOST_COMPONENTS})
   if(Boost_FOUND)
@@ -375,6 +429,7 @@ if(BOOST_COMPONENTS)
   endif(Boost_FOUND)
 endif(BOOST_COMPONENTS)
 
+###############################################################################
 if(COMPILE_TESTS)
   enable_testing()
 endif(COMPILE_TESTS)
@@ -387,10 +442,20 @@ endif(COMPILE_EXAMPLES)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/common/project_version.h.in
                ${CMAKE_CURRENT_SOURCE_DIR}/src/common/project_version.h @ONLY)
 
+# Generate build_info.cpp with CMake cache variables
+include(GetCacheVariables)
+
+# make sure src/common/build_info.cpp has been removed
+execute_process(COMMAND rm ${CMAKE_CURRENT_SOURCE_DIR}/src/common/build_info.cpp
+                OUTPUT_QUIET ERROR_QUIET)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/common/build_info.cpp.in
+               ${CMAKE_CURRENT_BINARY_DIR}/src/common/build_info.cpp @ONLY)
+
 # Compile source files
 include_directories(${marian_SOURCE_DIR}/src)
 add_subdirectory(src)
 
+###############################################################################
 if(USE_DOXYGEN)
 # Add a target to generate API documentation with Doxygen
 find_package(Doxygen)

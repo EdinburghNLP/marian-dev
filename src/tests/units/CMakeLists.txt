@@ -5,6 +5,7 @@ set(UNIT_TESTS
     rnn_tests
     attention_tests
     fastopt_tests
+    utils_tests
 )
 
 foreach(test ${UNIT_TESTS})
@@ -15,6 +16,11 @@ foreach(test ${UNIT_TESTS})
   else(CUDA_FOUND)
     target_link_libraries("run_${test}" marian ${EXT_LIBS} Catch)
   endif(CUDA_FOUND)
+
+  if(MSVC)
+    # Disable C4305: truncation from 'double' to '_Ty'
+    target_compile_options("run_${test}" PUBLIC /wd4305)
+  endif(MSVC)
 
   add_test(NAME ${test} COMMAND "run_${test}")
 endforeach(test)

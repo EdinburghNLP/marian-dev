@@ -93,6 +93,12 @@ struct StaticLoss {
   StaticLoss(const RationalLoss& dynamic)
   : loss(dynamic.loss<float>()), count(dynamic.count<float>()) {}
 
+  StaticLoss operator +(const StaticLoss& other) const {
+    StaticLoss res(*this);
+    res += other;
+    return res;
+  }
+
   StaticLoss& operator +=(const StaticLoss& other) {
     loss = loss + other.loss;
     count = count + other.count;
@@ -331,6 +337,7 @@ public:
   : LabelwiseLoss(axes), // cross-entropy already reduces over axis -1
     labelSmoothing_(labelSmoothing), factorWeight_(factorWeight) {}
 
+  virtual ~CrossEntropyLoss() {}
 protected:
   float labelSmoothing_; // interpolation factor for label smoothing, see below
   float factorWeight_;   // give extra weight to factors
@@ -368,7 +375,7 @@ protected:
 
     if(labelWeights) {
       // We currently do not know how to use target factors and word-level label weights together
-      bool wordlevel = labelWeights->shape()[-3] > 1; // Time-dimension is not trivially 1, hence we have word-level weights. 
+      bool wordlevel = labelWeights->shape()[-3] > 1; // Time-dimension is not trivially 1, hence we have word-level weights.
       ABORT_IF(wordlevel && logits.getNumFactorGroups() > 1, "CE loss with word-level label weights is not implemented for factors");
       ce = ce * cast(labelWeights, Type::float32);
     }
@@ -379,15 +386,15 @@ protected:
 
 
 /**
- * @brief Unlikelihood loss across last axis, summed up over batch and time dimensions. This is an 
- * implementation of sequence-level unlikelihood loss from https://arxiv.org/abs/1908.04319. 
+ * @brief Unlikelihood loss across last axis, summed up over batch and time dimensions. This is an
+ * implementation of sequence-level unlikelihood loss from https://arxiv.org/abs/1908.04319.
  * We rely on word-level label weights where 1 is correct and 0 is marking an error. If there are not
  * zeros for a sentence it going to be trained with normal CE loss if there is at least one 0 it is going
  * to flip over to use SUL for that sentence to penalize the selected word.
- * 
+ *
  * SUL is implemented as:
  * -log(gather(1 - softmax(logits), -1, indices))
- * 
+ *
  * Factors are currently not supported.
  */
 class SequenceUnlikelihoodLoss : public CrossEntropyLoss {
@@ -411,32 +418,61 @@ protected:
     ABORT_IF(!mask, "mask is required"); // @TODO: check this, it seems weights for padding are by default 1, which would make this obsolete.
     // use label weights, where 1 is GOOD and 0 is BAD. After inversion here, now 1 marks, mask again to eliminate padding (might be obsolete)
     auto errorMask = (1.f - cast(labelWeights, Type::float32)) * cast(mask, Type::float32);
-  
+
     auto ceUl = logits.applyLossFunction(labels, [&](Expr logits, Expr indices) {
       return cast(unlikelihood(logits, indices), Type::float32);
     });
-  
+
     // compute if want to use CE or UL. If there are no errors train with CE, otherwise train _only on_ the errors with UL. This is the "mixed" training
-    // schedule from https://arxiv.org/abs/1908.04319. Providing labels with or without error scores we can easily switch between CE and UL. 
+    // schedule from https://arxiv.org/abs/1908.04319. Providing labels with or without error scores we can easily switch between CE and UL.
     auto onlyCe  = eq(sum(errorMask, /*axis=*/-3), 0.f); // [1, 1, dimBatch, 1] - equal 1 if no errors are present
     ceUl         = errorMask * ceUl;                     // don't use for correct label or padding
 
-    auto cost    = onlyCe * ce + (1.f - onlyCe) * ceUl;  // ce or unlikelihood part are never simultanously used as cost per batch entry 
+    auto cost    = onlyCe * ce + (1.f - onlyCe) * ceUl;  // ce or unlikelihood part are never simultanously used as cost per batch entry
 
     return cost;
   }
 };
 
-
 /**
- * @brief Cross entropy in rescorer used for computing sentences-level log probabilities
+ * @brief Cross entropy in rescorer used for computing sentences-level or word-level log
+ * probabilities
+ *
+ * This class differs from CrossEntropy in the different 'axes' setting, and that label smoothing
+ * is disabled.
  */
 class RescorerLoss : public CrossEntropyLoss {
+private:
+  bool wordScores_{false};  // compute word-level log probabilities
+
 public:
-  // sentence-wise CE, hence reduce only over time axis
-  // This class differs from CrossEntropy in the different 'axes' setting, and that label smoothing is disabled.
-  RescorerLoss() : CrossEntropyLoss(/*axes=*/{-3} /*time axis*/, /*smoothing=*/0.f, /*factorWeight=*/1.0f) {}
+  // For sentence-wise CE reduce only over time axis.
+  // For word-level CE do not reduce over any axis.
+  RescorerLoss(bool wordScores)
+      : CrossEntropyLoss(/*axes=*/wordScores ? std::vector<int>({}) : std::vector<int>({-3}),
+                         /*smoothing=*/0.f,
+                         /*factorWeight=*/1.0f),
+        wordScores_(wordScores) {}
+
+  virtual RationalLoss apply(Logits logits,
+                             const Words& labels,
+                             Expr mask = nullptr,
+                             Expr labelWeights = nullptr) override {
+    ABORT_IF(!mask, "Word-level CE from rescorer must have mask");
+    auto loss = CrossEntropyLoss::compute(logits, labels, mask, labelWeights);
+
+    if(!wordScores_) {  // for sentence-level CE, reduce loss and labels as in cross-entropy
+      return reduce(loss, mask);
+    } else {  // for word-level CE, reduce labels only to get sentence lengths
+      ABORT_IF(!loss, "Loss has not been computed");
+
+      Expr labelsSum = cast(mask, Type::float32);  // accumulate in float32
+      labelsSum = sum(labelsSum, -3);              // reduce over time axis to get sentence lengths
+      return RationalLoss(loss, labelsSum);
+    }
+  }
 };
+
 
 /**
  * @brief Factory for label-wise loss functions

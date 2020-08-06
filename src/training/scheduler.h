@@ -17,10 +17,15 @@ private:
   Ptr<TrainingState> state_;
   std::vector<Ptr<ValidatorBase>> validators_;
 
-  bool first_{true};
+  bool first_{true};        // true if this is the first update after renewing the training
 
   timer::Timer timer_;
   timer::Timer heartBeatTimer_;
+
+  // The variable helps to keep track of the end of the current epoch
+  // (regardless if it's the 1st or nth epoch and if it's a new or continued training),
+  // which indicates the end of the training data stream from STDIN
+  bool endOfStdin_{false};  // true at the end of the epoch if training from STDIN;
 
   // determine scheduled LR decay factor (--lr-decay-inv-sqrt option)
   float getScheduledLRDecayFactor(const TrainingState& state) const {
@@ -153,7 +158,6 @@ public:
   }
 
   bool keepGoing() {
-
     if(getSigtermFlag()) // received signal SIGERM => exit gracefully
       return false;
 
@@ -171,6 +175,10 @@ public:
     size_t stopAfterStalled = options_->get<size_t>("early-stopping");
     if(stopAfterStalled > 0 && !validators_.empty()
        && stalled() >= stopAfterStalled)
+      return false;
+
+    // stop if data streaming from STDIN is stopped
+    if(endOfStdin_)
       return false;
 
     return true;
@@ -196,8 +204,7 @@ public:
 
     registerTrainingObserver(validators_.back());
     if(!state_->loaded) {
-      state_->validators[validator->type()]["last-best"]
-          = validator->initScore();
+      state_->validators[validator->type()]["last-best"] = validator->initScore();
       state_->validators[validator->type()]["stalled"] = 0;
     }
     if(validators_.size() == 1)
@@ -215,12 +222,12 @@ public:
   }
 
   void validate(const std::vector<Ptr<ExpressionGraph>>& graphs,
-                bool final = false) {
+                bool isFinal = false) {
     // Do not validate if already validated (for instance, after the model is
     // loaded) or if validation is scheduled for another update, or when signal SIGTERM was received
     if(getSigtermFlag() // SIGTERM was received
        || state_->validated // already validated (in resumed training, for example)
-       || (!state_->enteredNewPeriodOf(options_->get<std::string>("valid-freq")) && !final)) // not now
+       || (!state_->enteredNewPeriodOf(options_->get<std::string>("valid-freq")) && !isFinal)) // not now
       return;
 
     bool firstValidator = true;
@@ -406,6 +413,11 @@ public:
   }
 
   void actAfterEpoch(TrainingState& state) override {
+    // stop if data streaming from STDIN is stopped for a TSV input
+    std::string firstPath = options_->get<std::vector<std::string>>("train-sets")[0];
+    if(options_->get<bool>("tsv", false) && (firstPath == "stdin" || firstPath == "-"))
+      endOfStdin_ = true;
+
     float factor = options_->get<float>("lr-decay");
 
     updateLearningRate(state);

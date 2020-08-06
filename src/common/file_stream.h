@@ -7,10 +7,21 @@
 #include "common/filesystem.h"
 #include "common/logging.h"
 
+// Even when compiling with clang, __GNUC__ may be defined, so
+// we need to add some extra checks to avoid compile errors with
+// respect to -Wsuggest-override.
 #ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsuggest-override"
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wunused-value"
+#  if defined(__has_warning)
+#    if __has_warning("-Wsuggest-override")
+#      pragma GCC diagnostic ignored "-Wsuggest-override"
+#    endif
+#  else
+#    pragma GCC diagnostic ignored "-Wsuggest-override"
+#  endif
 #endif
+
 #ifdef _MSC_VER
 #pragma warning(push) // 4101: 'identifier' : unreferenced local variable. One parameter variable in zstr.hpp is not used.
 #pragma warning(disable : 4101)
@@ -51,6 +62,8 @@ public:
   explicit OutputFileStream(const std::string& file);
   virtual ~OutputFileStream();
 
+  std::string getFileName() const;
+
   template <typename T>
   size_t write(const T* ptr, size_t num = 1) {
     std::ostream::write((char*)ptr, num * sizeof(T));
@@ -82,7 +95,7 @@ protected:
 
   void NormalizeTempPrefix(std::string& base) const;
   void MakeTemp(const std::string& base);
- 
+
 };
 
 }  // namespace io
