@@ -628,13 +628,9 @@ void ConfigParser::addOptionsTranslation(cli::CLIWrapper& cli) {
      "Return word alignment. Possible values: 0.0-1.0, hard, soft")
     ->implicit_val("1");
   cli.add<bool>("--word-scores",
-<<<<<<< HEAD
-      "Print word-level scores");
+      "Print word-level scores. One score per subword unit, not normalized even if --normalize");
   cli.add<bool>("--path-scores",
       "Output path scores for each word");
-=======
-      "Print word-level scores. One score per subword unit, not normalized even if --normalize");
->>>>>>> master
 #ifdef USE_SENTENCEPIECE
   cli.add<bool>("--no-spm-decode",
       "Keep the output segmented into SentencePiece subwords");
